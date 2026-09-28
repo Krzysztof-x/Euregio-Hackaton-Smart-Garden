@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
 """
-smart_garden_mqtt.py - Reads the DHT11 and sends temperature & humidity
-to the MQTT broker every few seconds.
-
-Needs:  paho-mqtt + adafruit-circuitpython-dht (see README)
-Run:    python3 smart_garden_mqtt.py      (Ctrl+C to stop)
+smart_garden_mqtt.py - Smart Garden Controller for Raspberry Pi
+- Reads DHT11 (Temperature & Humidity)
+- Subscribes to MQTT for ESP32 sensors (Soil Moisture & Light)
+- Publishes DHT11 readings to MQTT
+- Displays all 4 live sensor readings on the Grove RGB LCD (JHD1313M3)
 """
 
 import os
 import json
 import time
-import adafruit_dht
 import board
-import paho.mqtt.publish as publish
+import adafruit_dht
+import paho.mqtt.client as mqtt
 
-# ---- Load settings from shared config.json (with fallback) ----
-config_path = "config.json" if os.path.exists("config.json") else "../config.json"
+# ==============================================================================
+# 1. LOAD CONFIGURATION
+# ==============================================================================
+config_path = "config.json" if os.path.exists(
+    "config.json") else "../config.json"
 cfg = {}
 if os.path.exists(config_path):
     try:
@@ -32,51 +35,251 @@ BROKER_HOST = mqtt_cfg.get("host", "192.168.1.207")
 BROKER_PORT = mqtt_cfg.get("port", 1883)
 USERNAME = mqtt_cfg.get("username")
 PASSWORD = mqtt_cfg.get("password")
-SEND_INTERVAL_S = rpi_cfg.get("interval_s", 10)
+SEND_INTERVAL_S = rpi_cfg.get("interval_s", 5)
 
 TOPIC_TEMPERATURE = topics_cfg.get("temperature", "smartgarden/temperature")
 TOPIC_HUMIDITY = topics_cfg.get("humidity", "smartgarden/humidity")
+TOPIC_MOISTURE = topics_cfg.get("moisture", "smartgarden/moisture")
+TOPIC_LIGHT = topics_cfg.get("light", "smartgarden/light")
 
-# DHT11 data wire on GPIO4 (pin 7)
+# ==============================================================================
+# 2. HARDWARE SETUP (DHT11 & GROVE RGB LCD)
+# ==============================================================================
+# DHT11 on GPIO4 (Pin 7)
 dht_device = adafruit_dht.DHT11(board.D4)
+
+# Grove LCD on Hardware I2C (SDA=Pin 3, SCL=Pin 5)
+LCD_ADDR = 0x3E
+RGB_ADDR = 0x62
+lcd_available = False
+
+try:
+    i2c = board.I2C()
+    while not i2c.try_lock():
+        pass
+    devices = i2c.scan()
+    i2c.unlock()
+
+    if LCD_ADDR in devices:
+        lcd_available = True
+        if 0x62 in devices:
+            RGB_ADDR = 0x62
+        elif 0x30 in devices:
+            RGB_ADDR = 0x30
+        elif 0x60 in devices:
+            RGB_ADDR = 0x60
+        print(
+            f"[LCD] Grove RGB LCD initialized (LCD={hex(LCD_ADDR)}, RGB={hex(RGB_ADDR)})")
+    else:
+        print("[LCD] LCD not detected on I2C, running in headless mode.")
+except Exception as e:
+    print(f"[LCD] Could not initialize I2C: {e}")
+
+
+def set_rgb(r, g, b):
+    if not lcd_available:
+        return
+    while not i2c.try_lock():
+        pass
+    try:
+        if RGB_ADDR == 0x62:
+            i2c.writeto(RGB_ADDR, bytes([0x00, 0x00]))
+            i2c.writeto(RGB_ADDR, bytes([0x01, 0x00]))
+            i2c.writeto(RGB_ADDR, bytes([0x08, 0xAA]))
+            i2c.writeto(RGB_ADDR, bytes([0x04, r]))
+            i2c.writeto(RGB_ADDR, bytes([0x03, g]))
+            i2c.writeto(RGB_ADDR, bytes([0x02, b]))
+        else:
+            i2c.writeto(RGB_ADDR, bytes([0x00, 0x00]))
+            i2c.writeto(RGB_ADDR, bytes([0x01, 0x05]))
+            i2c.writeto(RGB_ADDR, bytes([0x02, b]))
+            i2c.writeto(RGB_ADDR, bytes([0x03, g]))
+            i2c.writeto(RGB_ADDR, bytes([0x04, r]))
+    except Exception:
+        pass
+    finally:
+        i2c.unlock()
+
+
+def lcd_cmd(cmd):
+    if not lcd_available:
+        return
+    while not i2c.try_lock():
+        pass
+    try:
+        i2c.writeto(LCD_ADDR, bytes([0x80, cmd]))
+    finally:
+        i2c.unlock()
+
+
+def lcd_data(data):
+    if not lcd_available:
+        return
+    while not i2c.try_lock():
+        pass
+    try:
+        i2c.writeto(LCD_ADDR, bytes([0x40, data]))
+    finally:
+        i2c.unlock()
+
+
+def init_lcd():
+    if not lcd_available:
+        return
+    time.sleep(0.05)
+    lcd_cmd(0x28)
+    time.sleep(0.005)
+    lcd_cmd(0x0C)
+    time.sleep(0.005)
+    lcd_cmd(0x01)
+    time.sleep(0.01)
+    set_rgb(0, 255, 100)
+
+
+def show_lcd(line1, line2=""):
+    if not lcd_available:
+        return
+    lcd_cmd(0x01)
+    time.sleep(0.005)
+    for c in line1[:16]:
+        lcd_data(ord(c))
+    if line2:
+        lcd_cmd(0xC0)
+        time.sleep(0.001)
+        for c in line2[:16]:
+            lcd_data(ord(c))
+
+
+# ==============================================================================
+# 3. LIVE STATE & DISPLAY REFRESH
+# ==============================================================================
+live_data = {
+    "temperature": None,
+    "humidity": None,
+    "moisture": None,
+    "light": None,
+}
+
+
+def update_display():
+    """Formats all 4 sensor values and updates LCD text + RGB color."""
+    t = f"{live_data['temperature']}C" if live_data["temperature"] is not None else "--C"
+    h = f"{live_data['humidity']}%" if live_data["humidity"] is not None else "--%"
+    m = f"{live_data['moisture']}%" if live_data["moisture"] is not None else "--%"
+    l = f"{live_data['light']}%" if live_data["light"] is not None else "--%"
+
+    line1 = f"T:{t:<5}  H:{h:<4}"
+    line2 = f"Soil:{m:<4} L:{l:<4}"
+    show_lcd(line1, line2)
+
+    # Dynamic RGB Color Status:
+    # Red: Soil dry (< 25%) -> Needs water!
+    # Green: Healthy garden state
+    # Blue: Humid (> 70%)
+    if live_data["moisture"] is not None and live_data["moisture"] < 25:
+        set_rgb(255, 0, 0)  # Red warning
+    elif live_data["humidity"] is not None and live_data["humidity"] > 70:
+        set_rgb(0, 100, 255)  # Blue humid
+    else:
+        set_rgb(0, 255, 50)  # Healthy green
+
+
+# ==============================================================================
+# 4. MQTT CLIENT (PUBLISH & SUBSCRIBE)
+# ==============================================================================
+def on_connect(client, userdata, flags, rc, properties=None):
+    if rc == 0:
+        print(f"[MQTT] Connected to {BROKER_HOST}:{BROKER_PORT}")
+        # Subscribe to ESP32 topics
+        client.subscribe("smartgarden/#")
+        print("[MQTT] Subscribed to 'smartgarden/#'")
+    else:
+        print(f"[MQTT] Connection failed (code {rc})")
+
+
+def on_message(client, userdata, msg):
+    payload = msg.payload.decode("utf-8", "ignore")
+    try:
+        # ESP32 Soil Moisture
+        if msg.topic == TOPIC_MOISTURE:
+            data = json.loads(payload)
+            live_data["moisture"] = data.get("moisture")
+            update_display()
+
+        # ESP32 Light Sensor
+        elif msg.topic == TOPIC_LIGHT:
+            data = json.loads(payload)
+            live_data["light"] = data.get("percent", data.get("light"))
+            update_display()
+    except Exception as e:
+        print(f"[MQTT] Parse error: {e}")
 
 
 def read_dht11():
-    """Return (temperature, humidity), or None if the read failed."""
     try:
-        temperature = dht_device.temperature
-        humidity = dht_device.humidity
-    except RuntimeError as error:
-        print(time.strftime("%H:%M:%S"), "DHT11 read failed:", error)
+        return dht_device.temperature, dht_device.humidity
+    except RuntimeError:
         return None
-    if temperature is None or humidity is None:
-        print(time.strftime("%H:%M:%S"), "DHT11 returned no value")
+    except Exception as e:
+        print(f"[DHT11] Error: {e}")
         return None
-    return temperature, humidity
 
 
-# Login data for the broker (None = no login)
-auth = {"username": USERNAME, "password": PASSWORD} if USERNAME else None
+# ==============================================================================
+# 5. MAIN LOOP
+# ==============================================================================
+def main():
+    init_lcd()
+    show_lcd("Smart Garden", "Connecting...")
 
-print(f"Sending to {BROKER_HOST}:{BROKER_PORT} every {SEND_INTERVAL_S} s (Ctrl+C to stop)")
+    try:
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    except AttributeError:
+        client = mqtt.Client()
 
-try:
-    while True:
-        reading = read_dht11()
-        if reading is not None:
-            temperature, humidity = reading
-            messages = [
-                (TOPIC_TEMPERATURE, temperature),
-                (TOPIC_HUMIDITY, humidity),
-            ]
-            try:
-                publish.multiple(messages, hostname=BROKER_HOST, port=BROKER_PORT, auth=auth)
-                print(time.strftime("%H:%M:%S"), "sent:", messages)
-            except Exception as error:
-                print(time.strftime("%H:%M:%S"), "could not send to the broker:", error)
+    if USERNAME:
+        client.username_pw_set(USERNAME, PASSWORD)
 
-        time.sleep(SEND_INTERVAL_S)
-except KeyboardInterrupt:
-    print("\nStopped.")
-finally:
-    dht_device.exit()
+    client.on_connect = on_connect
+    client.on_message = on_message
+
+    print(f"Connecting to broker at {BROKER_HOST}:{BROKER_PORT}...")
+    try:
+        client.connect(BROKER_HOST, BROKER_PORT, keepalive=60)
+        client.loop_start()  # Runs MQTT subscribe loop in background thread
+    except Exception as e:
+        print(f"[MQTT] Connect error: {e}")
+
+    show_lcd("Smart Garden", "Ready!")
+    time.sleep(2)
+
+    try:
+        while True:
+            # 1. Read DHT11 from Pi
+            reading = read_dht11()
+            if reading is not None:
+                temp, hum = reading
+                live_data["temperature"] = temp
+                live_data["humidity"] = hum
+
+                # Publish DHT11 readings to MQTT
+                client.publish(TOPIC_TEMPERATURE, str(temp))
+                client.publish(TOPIC_HUMIDITY, str(hum))
+                print(f"[DHT11] Temp: {temp}°C | Humidity: {hum}%")
+
+                update_display()
+
+            time.sleep(SEND_INTERVAL_S)
+
+    except KeyboardInterrupt:
+        print("\nStopping...")
+    finally:
+        client.loop_stop()
+        client.disconnect()
+        dht_device.exit()
+        set_rgb(0, 0, 0)
+        show_lcd("", "")
+
+
+if __name__ == "__main__":
+    main()
