@@ -42,6 +42,8 @@ def on_message(client, userdata, msg):
         data = json.loads(raw_payload)
         if "moisture" in data:
             details = f"Moisture: {data['moisture']:>4}%  |  Voltage: {data.get('voltage', 0):.2f}V  |  Raw: {data.get('raw', 0)}"
+        elif "percent" in data:
+            details = f"Light: {data['percent']:>4}%  |  Voltage: {data.get('voltage', 0):.2f}V  |  Raw: {data.get('raw', 0)}"
         elif "light" in data or "brightness" in data:
             details = f"Light: {data.get('light', data.get('brightness'))}"
         else:

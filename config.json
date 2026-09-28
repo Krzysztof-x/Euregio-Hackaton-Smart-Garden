@@ -13,13 +13,14 @@
   "topics": {
     "prefix": "smartgarden",
     "moisture": "smartgarden/moisture",
+    "light": "smartgarden/light",
     "temperature": "smartgarden/temperature",
-    "humidity": "smartgarden/humidity",
-    "light": "smartgarden/light"
+    "humidity": "smartgarden/humidity"
   },
   "esp32": {
-    "client_id": "esp32-soil-moisture",
-    "sensor_pin": 34,
+    "client_id": "esp32-garden-sensors",
+    "soil_pin": 34,
+    "light_pin": 35,
     "dry_value": 52700,
     "wet_value": 22000,
     "v_ref": 3.3,
@@ -28,7 +29,6 @@
   "rpi": {
     "client_id": "rpi-smart-garden",
     "dht_pin": 4,
-    "light_pin": 17,
     "interval_s": 10
   }
 }
