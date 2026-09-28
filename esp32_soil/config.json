@@ -1,0 +1,34 @@
+{
+  "wifi": {
+    "ssid": "ASUS_group4",
+    "password": "Group4!!"
+  },
+  "mqtt": {
+    "host": "192.168.1.207",
+    "port": 1883,
+    "ws_port": 9001,
+    "username": null,
+    "password": null
+  },
+  "topics": {
+    "prefix": "smartgarden",
+    "moisture": "smartgarden/moisture",
+    "temperature": "smartgarden/temperature",
+    "humidity": "smartgarden/humidity",
+    "light": "smartgarden/light"
+  },
+  "esp32": {
+    "client_id": "esp32-soil-moisture",
+    "sensor_pin": 34,
+    "dry_value": 52700,
+    "wet_value": 22000,
+    "v_ref": 3.3,
+    "interval_s": 5
+  },
+  "rpi": {
+    "client_id": "rpi-smart-garden",
+    "dht_pin": 4,
+    "light_pin": 17,
+    "interval_s": 10
+  }
+}

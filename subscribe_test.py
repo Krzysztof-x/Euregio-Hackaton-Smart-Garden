@@ -2,10 +2,22 @@ import json
 from datetime import datetime
 import paho.mqtt.client as mqtt
 
-# Configuration
-BROKER = "localhost"  # or "192.168.30.23"
+import os
+
+# Configuration (loads from config.json if available)
+BROKER = "localhost"
 PORT = 1883
 TOPIC = "smartgarden/#"
+
+if os.path.exists("config.json"):
+    try:
+        with open("config.json") as f:
+            c = json.load(f)
+            BROKER = c.get("mqtt", {}).get("host", BROKER)
+            PORT = c.get("mqtt", {}).get("port", PORT)
+            TOPIC = c.get("topics", {}).get("prefix", "smartgarden") + "/#"
+    except Exception:
+        pass
 
 
 def on_connect(client, userdata, flags, rc, properties=None):

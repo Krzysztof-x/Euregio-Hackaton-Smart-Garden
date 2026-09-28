@@ -4,28 +4,40 @@ import time
 import network
 from machine import ADC, Pin
 
-# ==============================================================================
-# CONFIGURATION
-# ==============================================================================
-WIFI_SSID = "ASUS_group4"
-WIFI_PASSWORD = "Group4!!"
+# Configuration (loaded from config.json if available)
+CONFIG = {
+    "wifi": {"ssid": "ASUS_group4", "password": "Group4!!"},
+    "mqtt": {"host": "192.168.1.207", "port": 1883, "username": None, "password": None},
+    "topics": {"moisture": "smartgarden/moisture"},
+    "esp32": {"client_id": "esp32-soil-moisture", "sensor_pin": 34, "dry_value": 52700, "wet_value": 22000, "v_ref": 3.3, "interval_s": 5}
+}
 
-MQTT_BROKER = "192.168.1.207"
-MQTT_PORT = 1883
-MQTT_TOPIC = "smartgarden/moisture"
-CLIENT_ID = "esp32-soil-moisture"
-INTERVAL = 5  # publish interval in seconds
+try:
+    with open("config.json") as f:
+        cfg = json.load(f)
+        for k in ("wifi", "mqtt", "topics", "esp32"):
+            if k in cfg:
+                CONFIG[k].update(cfg[k])
+except Exception:
+    pass
 
-# Sensor calibration (Pin 34 is on ADC1, safe to use with WiFi)
-SENSOR_PIN = 34
-DRY_VALUE = 52700
-WET_VALUE = 22000
-V_REF = 3.3
+WIFI_SSID = CONFIG["wifi"]["ssid"]
+WIFI_PASSWORD = CONFIG["wifi"]["password"]
+MQTT_BROKER = CONFIG["mqtt"]["host"]
+MQTT_PORT = CONFIG["mqtt"]["port"]
+MQTT_USER = CONFIG["mqtt"].get("username")
+MQTT_PASS = CONFIG["mqtt"].get("password")
+MQTT_TOPIC = CONFIG["topics"]["moisture"]
+CLIENT_ID = CONFIG["esp32"]["client_id"]
+INTERVAL = CONFIG["esp32"]["interval_s"]
+
+SENSOR_PIN = CONFIG["esp32"]["sensor_pin"]
+DRY_VALUE = CONFIG["esp32"]["dry_value"]
+WET_VALUE = CONFIG["esp32"]["wet_value"]
+V_REF = CONFIG["esp32"]["v_ref"]
 
 
-# ==============================================================================
 # SENSOR LOGIC
-# ==============================================================================
 adc = ADC(Pin(SENSOR_PIN))
 adc.atten(ADC.ATTN_11DB)
 
@@ -43,9 +55,7 @@ def read_sensor(samples=10):
     }
 
 
-# ==============================================================================
 # WIFI
-# ==============================================================================
 def connect_wifi():
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
@@ -62,14 +72,12 @@ def connect_wifi():
     return wlan
 
 
-# ==============================================================================
 # MAIN LOOP
-# ==============================================================================
 def main():
     connect_wifi()
 
     print(f"Connecting to MQTT Broker at {MQTT_BROKER}:{MQTT_PORT}...")
-    client = MQTTClient(CLIENT_ID, MQTT_BROKER, port=MQTT_PORT)
+    client = MQTTClient(CLIENT_ID, MQTT_BROKER, port=MQTT_PORT, user=MQTT_USER, password=MQTT_PASS)
     client.connect()
     print("MQTT OK! Streaming sensor data...\n")
 

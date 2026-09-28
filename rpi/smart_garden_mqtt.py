@@ -7,24 +7,37 @@ Needs:  paho-mqtt + adafruit-circuitpython-dht (see README)
 Run:    python3 smart_garden_mqtt.py      (Ctrl+C to stop)
 """
 
+import os
+import json
 import time
 import adafruit_dht
 import board
 import paho.mqtt.publish as publish
 from gpiozero import DigitalInputDevice
 
-# ---- Settings: change these to match your broker ----
-# IP of the computer running the MQTT broker ("localhost" if it's this Pi)
-BROKER_HOST = "192.168.1.207"
-BROKER_PORT = 1883             # default MQTT port
-USERNAME = None                # e.g. "garden" if the broker needs a login, otherwise None
-PASSWORD = None
-SEND_INTERVAL_S = 10           # send new values every 10 seconds
+# ---- Load settings from shared config.json (with fallback) ----
+config_path = "config.json" if os.path.exists("config.json") else "../config.json"
+cfg = {}
+if os.path.exists(config_path):
+    try:
+        with open(config_path) as f:
+            cfg = json.load(f)
+    except Exception:
+        pass
 
-# The topics the values are published on
-TOPIC_TEMPERATURE = "smartgarden/temperature"
-TOPIC_HUMIDITY = "smartgarden/humidity"
-TOPIC_LIGHT = "smartgarden/light"
+mqtt_cfg = cfg.get("mqtt", {})
+topics_cfg = cfg.get("topics", {})
+rpi_cfg = cfg.get("rpi", {})
+
+BROKER_HOST = mqtt_cfg.get("host", "192.168.1.207")
+BROKER_PORT = mqtt_cfg.get("port", 1883)
+USERNAME = mqtt_cfg.get("username")
+PASSWORD = mqtt_cfg.get("password")
+SEND_INTERVAL_S = rpi_cfg.get("interval_s", 10)
+
+TOPIC_TEMPERATURE = topics_cfg.get("temperature", "smartgarden/temperature")
+TOPIC_HUMIDITY = topics_cfg.get("humidity", "smartgarden/humidity")
+TOPIC_LIGHT = topics_cfg.get("light", "smartgarden/light")
 
 # DHT11 data wire on GPIO4 (pin 7)
 dht_device = adafruit_dht.DHT11(board.D4)
