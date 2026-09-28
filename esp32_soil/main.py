@@ -1,109 +1,97 @@
+from umqtt.simple import MQTTClient  # noqa: I001
 import json
-import socket
 import time
-
 import network
 from machine import ADC, Pin
 
-# Configuration
+# ==============================================================================
+# CONFIGURATION
+# ==============================================================================
 WIFI_SSID = "ASUS_group4"
 WIFI_PASSWORD = "Group4!!"
-SENSOR_PIN = 34
-SERVER_PORT = 80
 
+MQTT_BROKER = "192.168.1.207"
+MQTT_PORT = 1883
+MQTT_TOPIC = "smartgarden/moisture"
+CLIENT_ID = "esp32-soil-moisture"
+INTERVAL = 5  # publish interval in seconds
+
+# Sensor calibration (Pin 34 is on ADC1, safe to use with WiFi)
+SENSOR_PIN = 34
 DRY_VALUE = 52700
 WET_VALUE = 22000
 V_REF = 3.3
 
 
-class SoilMoistureSensor:
-    def __init__(self, pin_num: int, dry_val: int = DRY_VALUE, wet_val: int = WET_VALUE, v_ref: float = V_REF):
-        self.dry_val = dry_val
-        self.wet_val = wet_val
-        self.v_ref = v_ref
-        self.adc = ADC(Pin(pin_num))
-        if hasattr(self.adc, "atten"):
-            try:
-                self.adc.atten(ADC.ATTN_11DB)
-            except Exception:
-                pass
-
-    def read_raw(self, samples: int = 10) -> int:
-        total = 0
-        for _ in range(samples):
-            total += self.adc.read_u16()
-            time.sleep_ms(5)
-        return total // samples
-
-    def read_voltage(self, samples: int = 10) -> float:
-        return (self.read_raw(samples) / 65535.0) * self.v_ref
-
-    def read_percentage(self, samples: int = 10) -> float:
-        if self.dry_val == self.wet_val:
-            return 0.0
-        raw = self.read_raw(samples)
-        percent = (self.dry_val - raw) / (self.dry_val - self.wet_val) * 100.0
-        return max(0.0, min(100.0, percent))
+# ==============================================================================
+# SENSOR LOGIC
+# ==============================================================================
+adc = ADC(Pin(SENSOR_PIN))
+adc.atten(ADC.ATTN_11DB)
 
 
-def connect_wifi(ssid: str, password: str, timeout: int = 15) -> str:
+def read_sensor(samples=10):
+    raw = sum(adc.read_u16() for _ in range(samples)) // samples
+    voltage = round((raw / 65535.0) * V_REF, 2)
+    diff = DRY_VALUE - WET_VALUE
+    moisture = max(0.0, min(100.0, (DRY_VALUE - raw) /
+                   diff * 100.0)) if diff else 0.0
+    return {
+        "raw": raw,
+        "voltage": voltage,
+        "moisture": round(moisture, 1)
+    }
+
+
+# ==============================================================================
+# WIFI
+# ==============================================================================
+def connect_wifi():
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
-
     if not wlan.isconnected():
-        print(f"Connecting to WiFi '{ssid}'...")
-        wlan.connect(ssid, password)
+        print(f"Connecting to WiFi '{WIFI_SSID}'...")
+        wlan.connect(WIFI_SSID, WIFI_PASSWORD)
         start = time.time()
         while not wlan.isconnected():
-            if time.time() - start > timeout:
-                raise RuntimeError("WiFi connection timed out")
+            if time.time() - start > 15:
+                raise RuntimeError("WiFi connection timeout!")
             time.sleep(0.5)
+    ip, _, gw, _ = wlan.ifconfig()
+    print(f"WiFi OK: IP={ip} | Gateway={gw}")
+    return wlan
 
-    ip = wlan.ifconfig()[0]
-    print(f"Connected! IP: {ip}")
-    return ip
 
+# ==============================================================================
+# MAIN LOOP
+# ==============================================================================
+def main():
+    connect_wifi()
 
-def start_server(sensor: SoilMoistureSensor, port: int = 80):
-    addr = socket.getaddrinfo("0.0.0.0", port)[0][-1]
-    server_socket = socket.socket()
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_socket.bind(addr)
-    server_socket.listen(2)
-    print(f"API server listening on port {port}")
+    print(f"Connecting to MQTT Broker at {MQTT_BROKER}:{MQTT_PORT}...")
+    client = MQTTClient(CLIENT_ID, MQTT_BROKER, port=MQTT_PORT)
+    client.connect()
+    print("MQTT OK! Streaming sensor data...\n")
 
     while True:
-        client = None
         try:
-            client, _ = server_socket.accept()
-            _ = client.recv(1024)
-
-            payload = json.dumps({
-                "raw": sensor.read_raw(),
-                "voltage": round(sensor.read_voltage(), 2),
-                "moisture": round(sensor.read_percentage(), 1)
-            })
-
-            res = (
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: application/json\r\n"
-                "Access-Control-Allow-Origin: *\r\n"
-                f"Content-Length: {len(payload)}\r\n\r\n"
-                f"{payload}"
-            )
-            client.sendall(res.encode("utf-8"))
+            data = read_sensor()
+            payload = json.dumps(data)
+            client.publish(MQTT_TOPIC, payload)
+            print(f"[{MQTT_TOPIC}] {payload}")
+            time.sleep(INTERVAL)
+        except KeyboardInterrupt:
+            print("\nExiting...")
+            client.disconnect()
+            break
         except Exception as e:
-            print("Request error:", e)
-        finally:
-            if client:
-                client.close()
-
-
-def main():
-    sensor = SoilMoistureSensor(pin_num=SENSOR_PIN)
-    ip = connect_wifi(WIFI_SSID, WIFI_PASSWORD)
-    print(f"API endpoint: http://{ip}/ (or /api/moisture)")
-    start_server(sensor, port=SERVER_PORT)
+            print(f"Error ({e}), reconnecting in 3s...")
+            time.sleep(3)
+            try:
+                connect_wifi()
+                client.connect()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
