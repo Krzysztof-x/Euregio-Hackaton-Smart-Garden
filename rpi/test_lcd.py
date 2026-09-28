@@ -11,50 +11,141 @@ Pins:
 import time
 import sys
 
-try:
-    import board
-    import bitbangio
-    # Initialize software I2C on GPIO 14 (SDA) and GPIO 15 (SCL)
-    i2c = bitbangio.I2C(scl=board.D15, sda=board.D14)
-except Exception as e:
-    print(f"Error loading board/bitbangio: {e}")
-    print("Make sure adafruit-blinka is installed: pip install adafruit-blinka")
-    sys.exit(1)
-
 LCD_ADDR = 0x3E
 RGB_ADDR = 0x62
 
+# Try Adafruit bitbangio first, fall back to pure RPi.GPIO bitbang
+i2c = None
+
+try:
+    import adafruit_bitbangio as bitbangio
+    import board
+    i2c_dev = bitbangio.I2C(scl=board.D15, sda=board.D14)
+
+    class AdafruitAdapter:
+        def __init__(self, dev):
+            self.dev = dev
+
+        def scan(self):
+            while not self.dev.try_lock():
+                pass
+            found = self.dev.scan()
+            self.dev.unlock()
+            return found
+
+        def writeto(self, addr, buf):
+            while not self.dev.try_lock():
+                pass
+            try:
+                self.dev.writeto(addr, bytes(buf))
+            finally:
+                self.dev.unlock()
+
+    i2c = AdafruitAdapter(i2c_dev)
+    print("Using adafruit_bitbangio driver.")
+except Exception:
+    pass
+
+if i2c is None:
+    # Pure Python Software I2C using RPi.GPIO
+    try:
+        import RPi.GPIO as GPIO
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setwarnings(False)
+
+        class SoftI2C:
+            def __init__(self, sda=14, scl=15):
+                self.sda = sda
+                self.scl = scl
+                GPIO.setup(self.scl, GPIO.OUT, initial=GPIO.HIGH)
+                GPIO.setup(self.sda, GPIO.OUT, initial=GPIO.HIGH)
+
+            def _delay(self):
+                time.sleep(0.00001)  # ~50 kHz
+
+            def _start(self):
+                GPIO.setup(self.sda, GPIO.OUT)
+                GPIO.output(self.sda, GPIO.HIGH)
+                GPIO.output(self.scl, GPIO.HIGH)
+                self._delay()
+                GPIO.output(self.sda, GPIO.LOW)
+                self._delay()
+                GPIO.output(self.scl, GPIO.LOW)
+                self._delay()
+
+            def _stop(self):
+                GPIO.setup(self.sda, GPIO.OUT)
+                GPIO.output(self.sda, GPIO.LOW)
+                self._delay()
+                GPIO.output(self.scl, GPIO.HIGH)
+                self._delay()
+                GPIO.output(self.sda, GPIO.HIGH)
+                self._delay()
+
+            def _write_byte(self, byte):
+                GPIO.setup(self.sda, GPIO.OUT)
+                for i in range(8):
+                    bit = (byte >> (7 - i)) & 1
+                    GPIO.output(self.sda, bit)
+                    self._delay()
+                    GPIO.output(self.scl, GPIO.HIGH)
+                    self._delay()
+                    GPIO.output(self.scl, GPIO.LOW)
+                    self._delay()
+
+                # Read ACK
+                GPIO.setup(self.sda, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+                self._delay()
+                GPIO.output(self.scl, GPIO.HIGH)
+                self._delay()
+                ack = GPIO.input(self.sda)
+                GPIO.output(self.scl, GPIO.LOW)
+                self._delay()
+                return ack == 0
+
+            def scan(self):
+                found = []
+                for addr in range(0x08, 0x78):
+                    self._start()
+                    if self._write_byte(addr << 1):
+                        found.append(addr)
+                    self._stop()
+                    self._delay()
+                return found
+
+            def writeto(self, addr, buf):
+                self._start()
+                if not self._write_byte(addr << 1):
+                    self._stop()
+                    return False
+                for b in buf:
+                    self._write_byte(b)
+                self._stop()
+                return True
+
+        i2c = SoftI2C(sda=14, scl=15)
+        print("Using built-in RPi.GPIO Software I2C.")
+    except Exception as e:
+        print(f"Error initializing GPIO I2C: {e}")
+        print("Please install bitbangio: pip install adafruit-circuitpython-bitbangio")
+        sys.exit(1)
+
 
 def set_rgb(r, g, b):
-    while not i2c.try_lock():
-        pass
-    try:
-        i2c.writeto(RGB_ADDR, bytes([0x00, 0x00]))
-        i2c.writeto(RGB_ADDR, bytes([0x01, 0x00]))
-        i2c.writeto(RGB_ADDR, bytes([0x08, 0xAA]))
-        i2c.writeto(RGB_ADDR, bytes([0x04, r]))
-        i2c.writeto(RGB_ADDR, bytes([0x03, g]))
-        i2c.writeto(RGB_ADDR, bytes([0x02, b]))
-    finally:
-        i2c.unlock()
+    i2c.writeto(RGB_ADDR, [0x00, 0x00])
+    i2c.writeto(RGB_ADDR, [0x01, 0x00])
+    i2c.writeto(RGB_ADDR, [0x08, 0xAA])
+    i2c.writeto(RGB_ADDR, [0x04, r])
+    i2c.writeto(RGB_ADDR, [0x03, g])
+    i2c.writeto(RGB_ADDR, [0x02, b])
 
 
 def lcd_cmd(cmd):
-    while not i2c.try_lock():
-        pass
-    try:
-        i2c.writeto(LCD_ADDR, bytes([0x80, cmd]))
-    finally:
-        i2c.unlock()
+    i2c.writeto(LCD_ADDR, [0x80, cmd])
 
 
 def lcd_data(data):
-    while not i2c.try_lock():
-        pass
-    try:
-        i2c.writeto(LCD_ADDR, bytes([0x40, data]))
-    finally:
-        i2c.unlock()
+    i2c.writeto(LCD_ADDR, [0x40, data])
 
 
 def init_lcd():
@@ -84,15 +175,8 @@ def main():
     print("Testing Grove RGB LCD on SDA=GPIO14, SCL=GPIO15...")
     print("=" * 60)
 
-    # I2C Scan
-    while not i2c.try_lock():
-        pass
     found = i2c.scan()
-    i2c.unlock()
-
     print(f"I2C scan results: {[hex(x) for x in found]}")
-    if LCD_ADDR not in found:
-        print(f"Warning: LCD address {hex(LCD_ADDR)} not detected on SDA/SCL!")
 
     print("Initializing LCD...")
     init_lcd()
