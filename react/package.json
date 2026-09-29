@@ -7,9 +7,15 @@
     "dev": "vite --host",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host",
-    "start": "node server/index.js"
+    "start": "node server/index.js",
+    "cap:sync": "vite build && cap sync android",
+    "cap:open": "cap open android",
+    "cap:run": "cap run android"
   },
   "dependencies": {
+    "@capacitor/android": "^8.5.2",
+    "@capacitor/cli": "^8.5.2",
+    "@capacitor/core": "^8.5.2",
     "lucide-react": "^1.48.0",
     "mqtt": "^5.16.0",
     "react": "^19.3.0",
