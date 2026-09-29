@@ -4,7 +4,7 @@
     "password": "Group4!!"
   },
   "mqtt": {
-    "host": "192.168.1.207",
+    "host": "192.168.1.192",
     "port": 1883,
     "ws_port": 9001,
     "username": null,

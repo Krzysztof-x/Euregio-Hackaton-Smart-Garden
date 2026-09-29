@@ -7,7 +7,7 @@ from machine import ADC, Pin
 # Configuration (loaded from config.json if available)
 CONFIG = {
     "wifi": {"ssid": "ASUS_group4", "password": "Group4!!"},
-    "mqtt": {"host": "192.168.1.207", "port": 1883, "username": None, "password": None},
+    "mqtt": {"host": "192.168.1.192", "port": 1883, "username": None, "password": None},
     "topics": {
         "moisture": "smartgarden/moisture",
         "light": "smartgarden/light"
