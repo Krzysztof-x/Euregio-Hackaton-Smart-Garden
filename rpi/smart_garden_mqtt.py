@@ -10,6 +10,8 @@ smart_garden_mqtt.py - Smart Garden Controller for Raspberry Pi
 import os
 import json
 import time
+import subprocess
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import board
 import adafruit_dht
 import paho.mqtt.client as mqtt
@@ -45,17 +47,33 @@ TOPIC_LIGHT = topics_cfg.get("light", "smartgarden/light")
 # ==============================================================================
 # 2. HARDWARE SETUP (DHT11 & GROVE RGB LCD)
 # ==============================================================================
+# Kill any orphaned pulsein helper processes from earlier runs that lock GPIO pins
+try:
+    subprocess.run(["killall", "-9", "libgpiod_pulsein"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+except Exception:
+    pass
+
 # DHT11 setup (configurable in config.json under rpi.dht_pin, default 4)
 DHT_PIN_NUM = rpi_cfg.get("dht_pin", 4)
 dht_pin_attr = f"D{DHT_PIN_NUM}"
 dht_pin = getattr(board, dht_pin_attr, board.D4)
 
-dht_device = None
-try:
-    dht_device = adafruit_dht.DHT11(dht_pin)
-    print(f"[DHT11] Initialized on GPIO {DHT_PIN_NUM}")
-except Exception as e:
-    print(f"[DHT11] Warning: Could not initialize on GPIO {DHT_PIN_NUM}: {e}")
+def create_dht_device():
+    """Instantiate DHT11 with use_pulseio=False to avoid libgpiod deadlocks."""
+    try:
+        return adafruit_dht.DHT11(dht_pin, use_pulseio=False)
+    except TypeError:
+        return adafruit_dht.DHT11(dht_pin)
+    except Exception as e:
+        print(f"[DHT11] Warning: Failed creating DHT device on GPIO {DHT_PIN_NUM}: {e}")
+        return None
+
+dht_device = create_dht_device()
+if dht_device is not None:
+    print(f"[DHT11] Initialized on GPIO {DHT_PIN_NUM} (use_pulseio=False)")
+else:
+    print(f"[DHT11] Warning: Could not initialize on GPIO {DHT_PIN_NUM}")
     print("[DHT11] (Hint: If GPIO 4 is used, ensure 1-Wire overlay is disabled or try GPIO 17)")
 
 # Grove LCD on Hardware I2C (SDA=Pin 3, SCL=Pin 5)
@@ -225,12 +243,14 @@ def on_message(client, userdata, msg):
         print(f"[MQTT] Parse error: {e}")
 
 
-def read_dht11():
+dht_executor = ThreadPoolExecutor(max_workers=1)
+
+
+def _raw_read_dht11():
     global dht_device
     if dht_device is None:
-        try:
-            dht_device = adafruit_dht.DHT11(dht_pin)
-        except Exception:
+        dht_device = create_dht_device()
+        if dht_device is None:
             return None
     try:
         t = dht_device.temperature
@@ -239,10 +259,28 @@ def read_dht11():
             return t, h
         return None
     except RuntimeError:
-        # Transient read error typical of DHT sensors
+        # Checksum / timing miss typical of DHT11
         return None
     except Exception as e:
         print(f"[DHT11] Unexpected error: {e}")
+        return None
+
+
+def read_dht11(timeout=2.5):
+    """Safely executes DHT11 reading with a timeout to avoid hangs on locked GPIO lines."""
+    future = dht_executor.submit(_raw_read_dht11)
+    try:
+        return future.result(timeout=timeout)
+    except TimeoutError:
+        print(f"[DHT11] Timeout (> {timeout}s) on GPIO {DHT_PIN_NUM} (pin busy or 1-Wire conflict).")
+        # Reset device handle so next loop attempt creates a fresh one
+        global dht_device
+        if dht_device is not None:
+            try:
+                dht_device.exit()
+            except Exception:
+                pass
+            dht_device = None
         return None
 
 
@@ -272,7 +310,8 @@ def main():
         print(f"[MQTT] Connect error: {e}")
 
     show_lcd("Smart Garden", "Ready!")
-    time.sleep(2)
+    time.sleep(1)
+    update_display()
 
     try:
         while True:
