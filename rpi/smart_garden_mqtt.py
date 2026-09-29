@@ -45,8 +45,18 @@ TOPIC_LIGHT = topics_cfg.get("light", "smartgarden/light")
 # ==============================================================================
 # 2. HARDWARE SETUP (DHT11 & GROVE RGB LCD)
 # ==============================================================================
-# DHT11 on GPIO4 (Pin 7)
-dht_device = adafruit_dht.DHT11(board.D4)
+# DHT11 setup (configurable in config.json under rpi.dht_pin, default 4)
+DHT_PIN_NUM = rpi_cfg.get("dht_pin", 4)
+dht_pin_attr = f"D{DHT_PIN_NUM}"
+dht_pin = getattr(board, dht_pin_attr, board.D4)
+
+dht_device = None
+try:
+    dht_device = adafruit_dht.DHT11(dht_pin)
+    print(f"[DHT11] Initialized on GPIO {DHT_PIN_NUM}")
+except Exception as e:
+    print(f"[DHT11] Warning: Could not initialize on GPIO {DHT_PIN_NUM}: {e}")
+    print("[DHT11] (Hint: If GPIO 4 is used, ensure 1-Wire overlay is disabled or try GPIO 17)")
 
 # Grove LCD on Hardware I2C (SDA=Pin 3, SCL=Pin 5)
 LCD_ADDR = 0x3E
@@ -216,12 +226,23 @@ def on_message(client, userdata, msg):
 
 
 def read_dht11():
+    global dht_device
+    if dht_device is None:
+        try:
+            dht_device = adafruit_dht.DHT11(dht_pin)
+        except Exception:
+            return None
     try:
-        return dht_device.temperature, dht_device.humidity
+        t = dht_device.temperature
+        h = dht_device.humidity
+        if t is not None and h is not None:
+            return t, h
+        return None
     except RuntimeError:
+        # Transient read error typical of DHT sensors
         return None
     except Exception as e:
-        print(f"[DHT11] Error: {e}")
+        print(f"[DHT11] Unexpected error: {e}")
         return None
 
 
@@ -265,9 +286,11 @@ def main():
                 # Publish DHT11 readings to MQTT
                 client.publish(TOPIC_TEMPERATURE, str(temp))
                 client.publish(TOPIC_HUMIDITY, str(hum))
-                print(f"[DHT11] Temp: {temp}°C | Humidity: {hum}%")
+                print(f"[DHT11] Temp: {temp}°C | Humidity: {hum}% -> Published")
 
                 update_display()
+            else:
+                print(f"[DHT11] Read failed or pin busy on GPIO {DHT_PIN_NUM}. Retrying in {SEND_INTERVAL_S}s...")
 
             time.sleep(SEND_INTERVAL_S)
 
@@ -276,7 +299,11 @@ def main():
     finally:
         client.loop_stop()
         client.disconnect()
-        dht_device.exit()
+        if dht_device is not None:
+            try:
+                dht_device.exit()
+            except Exception:
+                pass
         set_rgb(0, 0, 0)
         show_lcd("", "")
 
